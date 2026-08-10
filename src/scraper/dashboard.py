@@ -29,7 +29,10 @@ def _scalar(conn, sql, default=0):
     return v if v is not None else default
 
 
-def gather(source: str | None = None) -> dict:
+PREVIEW_PER_PAGE = 20
+
+
+def gather(source: str | None = None, page: int = 1) -> dict:
     # Optional per-source filter: `pw`/`vw`/`rw` are WHERE/AND fragments applied
     # to product (p)/variant (v)/review (r) queries; `prm` carries the param.
     prm = {"src": source}
@@ -83,8 +86,16 @@ def gather(source: str | None = None) -> dict:
             f"FROM {S}.review r JOIN {S}.product p ON p.source=r.source AND p.product_id=r.product_id "
             f"WHERE 1=1{pw} "
             f"ORDER BY r.review_date DESC NULLS LAST LIMIT 12"), prm).all()
-        # Raw preview: ~20 products with every column (one variant each),
-        # joined to the store table for store name/city/state/zip.
+        # Raw preview: paginated products with every column (one variant each),
+        # joined to the store table for store name/city/state/zip. Total distinct
+        # products == d["products"], so reuse it to compute the page count.
+        total = d["products"]
+        pages = max(1, (total + PREVIEW_PER_PAGE - 1) // PREVIEW_PER_PAGE)
+        page = min(max(1, page), pages)
+        d["preview_page"] = page
+        d["preview_pages"] = pages
+        d["preview_total"] = total
+        pv_prm = {**prm, "lim": PREVIEW_PER_PAGE, "off": (page - 1) * PREVIEW_PER_PAGE}
         d["preview"] = c.execute(text(
             f"SELECT DISTINCT ON (p.product_id) p.source, p.product_id, p.name, p.brand, "
             f"p.category, p.subcategory, v.size, v.price, v.list_price, v.on_deal, v.store_id, "
@@ -94,7 +105,8 @@ def gather(source: str | None = None) -> dict:
             f"FROM {S}.product p "
             f"LEFT JOIN {S}.product_variant v ON v.source=p.source AND v.product_id=p.product_id "
             f"LEFT JOIN {S}.store st ON st.source=p.source AND st.store_id=v.store_id "
-            f"WHERE 1=1{pw} ORDER BY p.product_id LIMIT 20"), prm).mappings().all()
+            f"WHERE 1=1{pw} ORDER BY p.product_id LIMIT :lim OFFSET :off"),
+            pv_prm).mappings().all()
         return d
 
 
@@ -163,6 +175,38 @@ def _preview_table(rows) -> str:
         for r in rows
     )
     return f'<div class="scroll"><table class="wide"><tr>{head}</tr>{body}</table></div>'
+
+
+def _pager(page: int, pages: int, source: str | None) -> str:
+    """Prev/next + numbered page links for the preview, preserving ?source."""
+    if pages <= 1:
+        return ""
+    base = f"?source={html.escape(source)}&" if source else "?"
+
+    def link(p, label, *, disabled=False, active=False):
+        if disabled:
+            return f'<span class="pg disabled">{label}</span>'
+        cls = "pg active" if active else "pg"
+        return f'<a class="{cls}" href="{base}page={p}#preview">{label}</a>'
+
+    # windowed page numbers around the current page
+    lo, hi = max(1, page - 2), min(pages, page + 2)
+    nums = []
+    if lo > 1:
+        nums.append(link(1, "1"))
+        if lo > 2:
+            nums.append('<span class="pg ell">…</span>')
+    for p in range(lo, hi + 1):
+        nums.append(link(p, str(p), active=(p == page)))
+    if hi < pages:
+        if hi < pages - 1:
+            nums.append('<span class="pg ell">…</span>')
+        nums.append(link(pages, str(pages)))
+
+    prev = link(page - 1, "‹ prev", disabled=(page <= 1))
+    nxt = link(page + 1, "next ›", disabled=(page >= pages))
+    return (f'<div class="pager">{prev}{"".join(nums)}{nxt}'
+            f'<span class="pg-info">page {page} of {pages}</span></div>')
 
 
 def _bar(label, n, total, color="#7c3aed"):
@@ -293,6 +337,13 @@ def render(d: dict) -> str:
   .tab.active {{ background:#7c3aed; border-color:#7c3aed; color:#fff; }}
   .tab:hover {{ text-decoration:none; border-color:#7c3aed; }}
   .scroll {{ overflow-x:auto; }}
+  .pager {{ display:flex; gap:6px; align-items:center; margin-top:14px; flex-wrap:wrap; }}
+  .pg {{ padding:5px 11px; border:1px solid #26262e; border-radius:8px; font-size:13px;
+        color:#c7c7d0; background:#17171f; }}
+  .pg.active {{ background:#7c3aed; border-color:#7c3aed; color:#fff; }}
+  .pg:hover {{ text-decoration:none; border-color:#7c3aed; }}
+  .pg.disabled {{ color:#4a4a52; }} .pg.ell {{ border:0; background:none; }}
+  .pg-info {{ color:#8a8a95; font-size:12px; margin-left:8px; }}
   table.wide {{ font-size:12px; }}
   table.wide th, table.wide td {{ white-space:nowrap; max-width:300px; overflow:hidden; text-overflow:ellipsis; }}
 </style></head><body>
@@ -301,7 +352,8 @@ def render(d: dict) -> str:
 {tabs}</header>
 <main>
   <div class="cards">{cards}</div>
-  <section><h2>Data preview — {len(d['preview'])} products, all columns</h2>{preview}</section>
+  <section id="preview"><h2>Data preview — {d.get('preview_total', 0)} products, all columns</h2>
+    {preview}{_pager(d.get('preview_page', 1), d.get('preview_pages', 1), active)}</section>
   {"" if active else f'<section><h2>Products by source</h2>{srcs}</section>'}
   <section><h2>Products by category</h2>{cats or '<div class="sub">no data yet</div>'}</section>
   <section><h2>Products by subcategory</h2>{subs}</section>
@@ -442,8 +494,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path in ("/", "/index.html"):
-                src = (parse_qs(parsed.query).get("source") or [None])[0]
-                body = render(gather(src))
+                q = parse_qs(parsed.query)
+                src = (q.get("source") or [None])[0]
+                try:
+                    page = int((q.get("page") or ["1"])[0])
+                except ValueError:
+                    page = 1
+                body = render(gather(src, page))
             elif parsed.path == "/stores":
                 body = render_stores(gather_stores(), gather()["sources"])
             elif parsed.path == "/product":
