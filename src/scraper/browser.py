@@ -22,6 +22,7 @@ a virtual display (xvfb-run) rather than headless=True.
 from __future__ import annotations
 
 import random
+import re
 import time
 from pathlib import Path
 
@@ -182,6 +183,29 @@ class TotalWineSession:
             if time.time() >= end:
                 return False
             self._page.wait_for_timeout(2000)
+
+    def set_store(self, store_info_url: str, store_id: str | None = None) -> bool:
+        """Pin a store by clicking "Set As My Store" on its store-info page.
+
+        This is the only reliable pin (fires CHANGE_LOCATION server-side); the
+        cookie alone isn't honored. Returns True if the store cookie reflects
+        the target afterwards.
+        """
+        try:
+            self._page.goto(store_info_url, wait_until="domcontentloaded", timeout=60_000)
+            self._page.wait_for_timeout(2500)
+            self._fidget()
+            self._page.get_by_text(re.compile("set as my store", re.I)).first.click(timeout=8000)
+            self._page.wait_for_timeout(3000)
+        except Exception:
+            return False
+        info = ""
+        try:
+            info = {c["name"]: c["value"] for c in self._ctx.cookies()}.get(
+                "twm-userStoreInformation", "")
+        except Exception:
+            pass
+        return f"ispStore~{store_id}" in info if store_id else bool(info)
 
     def get_json(self, url: str) -> dict | None:
         """Navigate to a JSON API endpoint (PX-gated to curl) and parse the

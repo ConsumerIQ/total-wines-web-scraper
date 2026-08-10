@@ -25,6 +25,7 @@ from .db import (
     existing_blocked_ids,
     existing_product_ids,
     insert_variants,
+    product_ids_with_variant,
     record_blocked,
     session_scope,
     upsert_products,
@@ -34,7 +35,13 @@ from .db import (
 from .models import ScrapeRun, utcnow
 from .products import in_scope, parse_product
 from .reviews import parse_reviews, parse_summary
-from .sitemaps import iter_product_urls, iter_stores, store_api_url, store_from_json
+from .sitemaps import (
+    iter_product_urls,
+    iter_stores,
+    store_api_url,
+    store_from_json,
+    store_info_urls,
+)
 
 log = logging.getLogger("scraper.pipeline")
 
@@ -292,7 +299,8 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
         delay_s: float = 1.0, block_resources: bool = False, resume: bool = True,
         pause_every: int = 0, pause_seconds: float = 180.0, block_pauses: int = 0,
         warm_seconds: int = 60, interactive: bool = False, solve_seconds: int = 90,
-        retry_blocked: bool = False, log_every: int = 25) -> dict:
+        retry_blocked: bool = False, store_id: str | None = None,
+        log_every: int = 25) -> dict:
     """Scrape product data for up to `limit` products from the sitemaps.
 
     Resumable: with resume=True, products already in the DB (for this source)
@@ -311,10 +319,17 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
     """
     ingested = skipped = errors = blocked = out_of_scope = 0
     thr = _Throttle(base=delay_s)
-    done = existing_product_ids(source) if resume else set()
+    # Per-store resume when a store is pinned (so store B doesn't skip products
+    # already captured at store A); otherwise resume by product.
+    if resume and store_id:
+        done = product_ids_with_variant(source, store_id)
+    elif resume:
+        done = existing_product_ids(source)
+    else:
+        done = set()
     if done:
-        log.info("resume: %d products already in DB (source=%s) will be skipped",
-                 len(done), source)
+        log.info("resume: %d products already captured%s will be skipped",
+                 len(done), f" at store {store_id}" if store_id else "")
     # Skip previously-blocked products by default so resume doesn't retry them
     # first and ramp the throttle; --retry-blocked forces another attempt.
     blocked_ids = set() if retry_blocked else existing_blocked_ids(source)
@@ -334,8 +349,14 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
         known_stores = {r[0] for r in _s.execute(_t(
             f"SELECT store_id FROM {_cfg.db_schema}.store WHERE source=:s"), {"s": source})}
 
+    store_info_url = store_info_urls().get(store_id) if store_id else None
+    if store_id and not store_info_url:
+        log.warning("no store-info URL for store %s — can't pin; aborting", store_id)
+        return {"ingested": 0, "error": f"unknown store {store_id}"}
+
     with session_scope() as session:
-        run_row = ScrapeRun(source=source, category="sitemap")
+        run_row = ScrapeRun(source=source,
+                            category=f"store:{store_id}" if store_id else "sitemap")
         session.add(run_row)
         session.flush()
         run_id = run_row.id
@@ -355,6 +376,12 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
             else:
                 log.warning("warm-up still blocked after %ds; the IP may be hot. "
                             "Continuing, but expect blocks.", warm_seconds)
+            if store_info_url:
+                if sess.set_store(store_info_url, store_id):
+                    log.info("pinned store %s", store_id)
+                else:
+                    log.warning("could not pin store %s — prices may be from another "
+                                "store; continuing", store_id)
             for url in iter_product_urls(limit=limit, max_sitemaps=max_sitemaps):
                 code = _url_code(url)
                 if code and (code in done or code in blocked_ids or code in excluded_ids):
@@ -426,6 +453,36 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
             row.notes = f"skipped={skipped} out_of_scope={out_of_scope} blocked={blocked}"
 
     summary = {"ingested": ingested, "skipped": skipped, "out_of_scope": out_of_scope,
-               "errors": errors, "blocked": blocked, "run_id": run_id}
+               "errors": errors, "blocked": blocked, "store": store_id, "run_id": run_id}
     log.info("run complete: %s", summary)
     return summary
+
+
+def stores_for_states(states: list[str], per_state: int = 1,
+                      source: str = DEFAULT_SOURCE) -> list[str]:
+    """Pick up to `per_state` store_ids per state from the (enriched) store
+    table. States match on the 2-letter code (e.g. TX, NJ)."""
+    from sqlalchemy import text as _t
+    from .config import config as _cfg
+    from .db import SessionLocal as _SL
+    picks: list[str] = []
+    with _SL() as s:
+        for st in states:
+            rows = s.execute(_t(
+                f"SELECT store_id FROM {_cfg.db_schema}.store "
+                f"WHERE source=:src AND upper(state)=upper(:st) AND zip IS NOT NULL "
+                f"ORDER BY store_id LIMIT :n"),
+                {"src": source, "st": st, "n": per_state}).all()
+            picks += [r[0] for r in rows]
+    return picks
+
+
+def run_stores(store_ids: list[str], *, source: str = DEFAULT_SOURCE,
+               limit: int | None = None, **run_kwargs) -> list[dict]:
+    """Scrape the catalog once per pinned store (per-store pricing). Each store
+    is an independent, resumable run — a new browser session per store."""
+    results = []
+    for i, sid in enumerate(store_ids, 1):
+        log.info("=== store %d/%d: %s ===", i, len(store_ids), sid)
+        results.append(run(source=source, store_id=sid, limit=limit, **run_kwargs))
+    return results

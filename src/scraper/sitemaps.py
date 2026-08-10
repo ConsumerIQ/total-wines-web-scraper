@@ -69,6 +69,19 @@ def store_api_url(store_id: str) -> str:
     return _STORE_API.format(sid=store_id)
 
 
+def store_info_urls() -> dict[str, str]:
+    """Map store_id -> store-info page URL (/store-info/<slug>/<id>) from the
+    store sitemap — used to pin a store via "Set As My Store"."""
+    store_sm = next((u for u in _locs(_get(INDEX_URL)) if "Store-en-USD" in u), None)
+    out: dict[str, str] = {}
+    if store_sm:
+        for url in _locs(_get(store_sm)):
+            m = _STORE_URL.match(url)
+            if m:
+                out[m.group(2)] = url
+    return out
+
+
 def store_from_json(store_id: str, j: dict | None) -> StoreIn | None:
     """Map the store-locator API JSON to a StoreIn. None if no usable data."""
     if not isinstance(j, dict) or not j.get("city"):

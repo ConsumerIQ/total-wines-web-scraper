@@ -54,8 +54,13 @@ def main() -> None:
                        help="also retry products that were blocked on earlier runs "
                             "(by default those are skipped)")
     p_run.add_argument("--store", default=None,
-                       help="walmart: pin an assortmentStoreId to widen the location-gated "
-                            "alcohol assortment")
+                       help="pin a single store id (totalwine: per-store pricing; "
+                            "walmart: assortmentStoreId)")
+    p_run.add_argument("--states", default=None,
+                       help="totalwine multi-store: comma-separated state codes (e.g. TX,NJ,PA); "
+                            "scrapes per-store pricing for stores in those states")
+    p_run.add_argument("--stores-per-state", type=int, default=1,
+                       help="how many stores per state to scrape with --states (default 1)")
     p_run.add_argument("--patient", action="store_true",
                        help="slower pace + proactive periodic breaks so PerimeterX escalates "
                             "less; blocked products are skipped (retried on a later resume run)")
@@ -134,14 +139,22 @@ def main() -> None:
             pause_every = args.pause_every or 0
             pause_seconds = args.pause_seconds or 180.0
 
-        print(run(source=args.source, limit=args.limit, max_sitemaps=args.max_sitemaps,
-                  max_wait_ms=args.max_wait_ms,
-                  delay_s=delay, block_resources=args.fast,
-                  resume=not args.no_resume,
-                  pause_every=pause_every, pause_seconds=pause_seconds,
-                  block_pauses=block_pauses, warm_seconds=args.warm_wait,
-                  interactive=args.interactive, solve_seconds=args.solve_wait,
-                  retry_blocked=args.retry_blocked))
+        common = dict(source=args.source, limit=args.limit, max_sitemaps=args.max_sitemaps,
+                      max_wait_ms=args.max_wait_ms, delay_s=delay, block_resources=args.fast,
+                      resume=not args.no_resume, pause_every=pause_every,
+                      pause_seconds=pause_seconds, block_pauses=block_pauses,
+                      warm_seconds=args.warm_wait, interactive=args.interactive,
+                      solve_seconds=args.solve_wait, retry_blocked=args.retry_blocked)
+        if args.states:
+            from .pipeline import run_stores, stores_for_states
+            states = [s.strip().upper() for s in args.states.split(",") if s.strip()]
+            store_ids = stores_for_states(states, args.stores_per_state, args.source)
+            print(f"multi-store: {len(store_ids)} stores across {states} -> {store_ids}")
+            print(run_stores(store_ids, **common))
+        elif args.store:
+            print(run(store_id=args.store, **common))
+        else:
+            print(run(**common))
     elif args.cmd == "run-parallel":
         from .parallel import run_parallel
 

@@ -80,6 +80,18 @@ def existing_product_ids(source: str) -> set[str]:
 PERMANENT_EXCLUSIONS = ("nonalcohol", "out_of_scope")
 
 
+def product_ids_with_variant(source: str, store_id: str) -> set[str]:
+    """product_ids that already have a variant for this store — per-store resume
+    (so scraping store B doesn't skip products already captured at store A)."""
+    with SessionLocal() as session:
+        return {
+            row[0]
+            for row in session.query(ProductVariant.product_id).filter(
+                ProductVariant.source == source, ProductVariant.store_id == store_id
+            )
+        }
+
+
 def existing_blocked_ids(source: str) -> set[str]:
     """PX-blocked product_ids for a source (excludes permanent exclusions) —
     skipped unless --retry-blocked."""
