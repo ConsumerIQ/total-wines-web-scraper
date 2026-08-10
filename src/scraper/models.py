@@ -84,7 +84,9 @@ class ProductVariant(Base):
     )
     product_id: Mapped[str] = mapped_column(String)
     size: Mapped[str | None] = mapped_column(String)
-    price: Mapped[float | None] = mapped_column(Float)
+    price: Mapped[float | None] = mapped_column(Float)       # effective (sale if on deal)
+    list_price: Mapped[float | None] = mapped_column(Float)  # regular (EDLP) price
+    on_deal: Mapped[bool | None] = mapped_column(Boolean)    # sale price present
     in_stock: Mapped[bool | None] = mapped_column(Boolean)
     stock: Mapped[int | None] = mapped_column(Integer)  # quantity available at store
 
@@ -198,6 +200,8 @@ class VariantIn(BaseModel):
     store_id: str = ""
     size: str | None = None
     price: float | None = Field(default=None, ge=0)
+    list_price: float | None = Field(default=None, ge=0)
+    on_deal: bool | None = None
     in_stock: bool | None = None
     stock: int | None = Field(default=None, ge=0)
 

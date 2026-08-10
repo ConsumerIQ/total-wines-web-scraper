@@ -108,7 +108,8 @@ def gather_product(source: str, pid: str) -> dict | None:
         if not prod:
             return None
         variants = c.execute(text(
-            f"SELECT size, price, in_stock, stock, store_id FROM {S}.product_variant "
+            f"SELECT size, price, list_price, on_deal, in_stock, stock, store_id "
+            f"FROM {S}.product_variant "
             f"WHERE source = :s AND product_id = :p ORDER BY price NULLS LAST"),
             {"s": source, "p": pid}).all()
         reviews = c.execute(text(
@@ -376,11 +377,12 @@ def render_product(pv: dict) -> str:
     variants = "".join(
         f"<tr><td>{html.escape(v.size or '')}</td>"
         f"<td>{('$'+str(v.price)) if v.price is not None else '—'}</td>"
+        f"<td>{('$'+str(v.list_price)) if (v.on_deal and v.list_price is not None) else ''}</td>"
         f"<td>{'in stock' if v.in_stock else ('out' if v.in_stock is False else '?')}</td>"
         f"<td>{v.stock if v.stock is not None else ''}</td>"
         f"<td>{html.escape(v.store_id or '')}</td></tr>"
         for v in pv["variants"]
-    ) or "<tr><td colspan=5 class='sub'>no variants</td></tr>"
+    ) or "<tr><td colspan=6 class='sub'>no variants</td></tr>"
     reviews = "".join(_review_card(r) for r in pv["reviews"]) \
         or '<div class="sub">no reviews stored for this product</div>'
     summ = (f'<section><h2>AI review summary</h2><div class="rb">'
@@ -395,7 +397,7 @@ def render_product(pv: dict) -> str:
     badges = ""
     if p.get("is_new"):
         badges += ' <span class="badge new">NEW</span>'
-    if (attrs.get("on_deal") is True) or (str(attrs.get("on_deal")).lower() == "true"):
+    if any(getattr(v, "on_deal", None) for v in pv["variants"]):
         badges += ' <span class="badge deal">DEAL</span>'
 
     return f"""<!doctype html><html><head><meta charset="utf-8">

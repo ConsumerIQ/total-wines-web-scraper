@@ -87,14 +87,29 @@ def _size(product: dict) -> str | None:
     return None
 
 
-def _first_price(product: dict) -> float | None:
-    price = product.get("price")
-    if isinstance(price, list) and price:
-        try:
-            return float(price[0].get("price"))
-        except (TypeError, ValueError):
-            return None
-    return None
+def _prices(product: dict) -> tuple[float | None, float | None, bool]:
+    """Parse the typed price array -> (effective, list_price, on_deal).
+
+    Entries look like [{"price":39.99,"type":"EDLP"}, {"price":29.99,"type":"LTSP"}]
+    where EDLP is the regular price and a non-EDLP type (e.g. LTSP = Limited-Time
+    Sale Price) is the deal. Effective = sale if present, else regular.
+    """
+    by_type: dict[str, float] = {}
+    for e in product.get("price") or []:
+        t, p = e.get("type"), e.get("price")
+        if t and p is not None:
+            try:
+                by_type[t] = float(p)
+            except (TypeError, ValueError):
+                pass
+    if not by_type:
+        return None, None, False
+    regular = by_type.get("EDLP")
+    sale = next((v for t, v in by_type.items() if t != "EDLP"), None)
+    effective = sale if sale is not None else regular
+    if regular is None:  # only a sale type present
+        regular = effective
+    return effective, regular, sale is not None
 
 
 def _attributes(product: dict) -> dict | None:
@@ -111,12 +126,11 @@ def _attributes(product: dict) -> dict | None:
     abv = product.get("alcoholPercentage")
     if abv is not None:
         attrs["alcoholPercentage"] = abv
-    # Promotions: salesStrategy is {} for regular items but populates when a
-    # product is on a deal — keep whatever TW provides (shape varies), verbatim.
+    # Promotion strategy label (e.g. {"name":"Winery Direct","type":"WD"}) when
+    # present — the on_deal price signal lives on the variant.
     ss = product.get("salesStrategy")
     if isinstance(ss, dict) and ss:
         attrs["salesStrategy"] = ss
-        attrs["on_deal"] = True
     return attrs or None
 
 
@@ -165,12 +179,15 @@ def parse_product(
         return None, None
 
     try:
+        eff, listp, on_deal = _prices(payload)
         variant = VariantIn(
             variant_id=sku_id,
             product_id=pid,
             store_id=str(payload.get("storeId") or ""),
             size=_size(payload),
-            price=_first_price(payload),
+            price=eff,
+            list_price=listp,
+            on_deal=on_deal,
             in_stock=_in_stock(payload),
             stock=_stock(payload),
         )
