@@ -71,6 +71,14 @@ def gather(source: str | None = None, page: int = 1) -> dict:
         d["runs"] = c.execute(text(
             f"SELECT id, source, started_at, finished_at, records_ingested, error_count, notes "
             f"FROM {S}.scrape_run WHERE 1=1{p_and} ORDER BY id DESC LIMIT 8"), prm).all()
+        # On-deal products: newest deal variant per product, with was/now price.
+        d["deals"] = c.execute(text(
+            f"SELECT DISTINCT ON (v.product_id) v.product_id, v.source, p.name, p.category, "
+            f"       v.size, v.price, v.list_price, v.store_id "
+            f"FROM {S}.product_variant v JOIN {S}.product p "
+            f"  ON p.source=v.source AND p.product_id=v.product_id "
+            f"WHERE v.on_deal = true{vw} "
+            f"ORDER BY v.product_id, v.captured_at DESC"), prm).all()
         # Order by ACTUAL stored review rows so every listed product has reviews.
         d["top"] = c.execute(text(
             f"SELECT p.source, p.product_id, p.name, p.category, v.size, v.price, p.avg_rating, "
@@ -302,6 +310,25 @@ def render(d: dict) -> str:
         or '<div class="sub">no reviews yet</div>'
     preview = _preview_table(d["preview"])
 
+    def _pct_off(now, was):
+        if now is None or not was:
+            return ""
+        try:
+            return f"-{round((1 - now / was) * 100)}%"
+        except (TypeError, ZeroDivisionError):
+            return ""
+    deals = "".join(
+        f'<tr><td><a href="/product?source={html.escape(str(r.source))}'
+        f'&id={html.escape(str(r.product_id))}">{html.escape(r.name or "")}</a></td>'
+        f"<td>{html.escape(r.category or '')}</td>"
+        f"<td>{html.escape(r.size or '')}</td>"
+        f'<td class="now">${r.price}</td>'
+        f'<td class="was">${r.list_price}</td>'
+        f'<td class="off">{_pct_off(r.price, r.list_price)}</td>'
+        f"<td>{html.escape(r.store_id or '')}</td></tr>"
+        for r in d["deals"]
+    )
+
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="15">
 <title>Total Wine Scraper — Dashboard</title>
@@ -344,6 +371,9 @@ def render(d: dict) -> str:
   .pg:hover {{ text-decoration:none; border-color:#7c3aed; }}
   .pg.disabled {{ color:#4a4a52; }} .pg.ell {{ border:0; background:none; }}
   .pg-info {{ color:#8a8a95; font-size:12px; margin-left:8px; }}
+  td.now {{ color:#f87171; font-weight:700; }}
+  td.was {{ color:#8a8a95; text-decoration:line-through; }}
+  td.off {{ color:#34d399; font-weight:600; }}
   table.wide {{ font-size:12px; }}
   table.wide th, table.wide td {{ white-space:nowrap; max-width:300px; overflow:hidden; text-overflow:ellipsis; }}
 </style></head><body>
@@ -352,6 +382,9 @@ def render(d: dict) -> str:
 {tabs}</header>
 <main>
   <div class="cards">{cards}</div>
+  {f'''<section id="deals"><h2>On deal — {len(d["deals"])} products <span class="sub">(sale price / was)</span></h2>
+    <table><tr><th>name</th><th>category</th><th>size</th><th>now</th><th>was</th><th>off</th><th>store</th></tr>{deals}</table>
+  </section>''' if d["deals"] else ""}
   <section id="preview"><h2>Data preview — {d.get('preview_total', 0)} products, all columns</h2>
     {preview}{_pager(d.get('preview_page', 1), d.get('preview_pages', 1), active)}</section>
   {"" if active else f'<section><h2>Products by source</h2>{srcs}</section>'}
