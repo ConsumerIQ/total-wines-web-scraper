@@ -1,29 +1,25 @@
-# Total Wine Scraper POC
+# Beverage-Alcohol Web Scraper
 
-Proof-of-concept scraper for **totalwine.com** product, pricing, review, and
-store data — a replacement for the paid **Bright Data** feed. Feasibility is
-**proven end to end** (see Phase-0 findings below).
+Scrapes retail beverage-alcohol data (product, per-store pricing, reviews, store
+locator) as a replacement for the paid **Bright Data** feed. Two retailers live:
+**Total Wine** (deep catalog) and **Walmart** (alcohol only). Data lands in a
+Postgres/Supabase schema `web_scraping`, tagged by `source`.
 
-## How it works (proven architecture)
+## How it works
 
-totalwine.com is protected by **PerimeterX / HUMAN** (not Akamai). Plain
-requests to any dynamic page return a 403 challenge. Two facts make scraping
-possible anyway:
+Both sites are protected by **PerimeterX / HUMAN**. Plain requests get a 403
+challenge, so we drive a **real Chrome via `patchright`** (stealth), which clears
+PX, then read the JSON the page serves itself:
 
-1. **Sitemaps are open** (plain curl, no bot check) and list the whole catalog:
-   `sitemap.xml` → 17 `Product-en-USD-*.xml` (~5k URLs each ≈ **85k products**)
-   plus `Store-en-USD.xml` (**217 stores**).
-2. **PerimeterX is cleared with `patchright` + real Chrome.** Because PX runs in
-   first-party mode (it signs the page's *own* XHRs), hand-issued API calls
-   (curl / `context.request` / in-page `fetch`) all 403. The reliable path is to
-   **load the product page like a human and intercept the JSON it fires itself**:
-   - `…/getProduct/<sku>` → name, brand, price, rating, review count, size, stock
-   - `…/product-reviews/v1/products/<id>/reviews` → customer reviews
-   - `…/reviews/summary` → Total Wine's AI review summary
+- **Total Wine** — enumerate SKUs from open sitemaps → load each product page →
+  intercept `getProduct` / `reviews` / `reviews/summary`. Pricing/stock are
+  per-store; the store is pinned via "Set As My Store".
+- **Walmart** — enumerate the alcohol browse categories → read each product
+  page's `__NEXT_DATA__`; reviews from `/reviews/product/<id>`.
 
-So: **enumerate SKUs from sitemaps → navigate each product page in a warm
-patchright/Chrome session → intercept + validate + store.** Scale by running
-several warm sessions / EC2 instances in parallel.
+Data is normalized: `product` (+ JSONB `attributes`), `product_variant` (price
+per **store**, in the key), `review`, `store` (address/zip/geo), `scrape_run`,
+`blocked_product`.
 
 ## Setup
 
@@ -31,86 +27,106 @@ several warm sessions / EC2 instances in parallel.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 patchright install chromium          # stealth browser runtime
-cp .env.example .env
+cp .env.example .env                 # set DB_URL (local docker or Supabase) + DB_SCHEMA=web_scraping
 ```
-You also need **Google Chrome** installed (the session uses `channel="chrome"`).
+Needs **Google Chrome** installed (session uses `channel="chrome"`). Run
+**headed** (PX blocks headless); on a headless server use `xvfb-run`.
 
-## Run
+## Commands
+
+| Command | What it does |
+|---|---|
+| `init-db` | Create schema `web_scraping` + all tables (idempotent; adds missing tables) |
+| `sync-stores [--source]` | Load + enrich the store locator (address/zip/phone/geo) via the browser |
+| `warm [--source]` | Open the browser so you can solve the first Press & Hold once (warms the profile) |
+| `run …` | Scrape products (see flags below) |
+| `backfill-reviews [--source --limit --delay-s]` | Re-fetch products that have a review count but no stored reviews |
+| `dashboard [--port 8000]` | Serve the local dashboard (All / per-source / Stores tabs) at localhost |
+| `run-parallel …` | Multi-worker scrape (needs one proxy/IP per worker) |
+
+## `run` flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--source <name>` | `totalwine` | Retailer: `totalwine` or `walmart`. Stamped on every row |
+| `--limit N` | none | Max products to ingest this run |
+| `--no-resume` | off | Don't skip products already in the DB |
+| `--retry-blocked` | off | Also retry products PX-blocked on earlier runs (not permanent exclusions) |
+| `--patient` | off | Slower pace + periodic breaks so PX escalates less (unattended long runs) |
+| `--interactive` | off | On a mid-run block, keep the challenge on screen and wait for **you** to solve it |
+| `--fast` | off | Max speed: no pacing + block images/css/fonts (small tests; higher block risk) |
+| `--delay-s S` | `1.0` | Base pause between products (adaptive; ramps up after blocks) |
+| `--pause-every N` | 60 w/ `--patient` | Take a break every N products |
+| `--pause-seconds S` | 240 w/ `--patient` | Length of each break |
+| `--warm-wait S` | `60` | Seconds to keep the homepage up at start so you can solve a Press & Hold |
+| `--solve-wait S` | `90` | Seconds to wait for a manual solve with `--interactive` |
+| `--max-wait-ms MS` | `10000` | Max wait for `getProduct` before giving up on a page |
+| `--max-sitemaps N` | all | Cap product sitemaps scanned (totalwine) |
+| `--store <id>` | none | Pin one store — totalwine: per-store pricing; walmart: assortmentStoreId |
+| `--states TX,NJ` | none | **totalwine multi-store**: scrape per-store pricing for stores in these states |
+| `--stores-per-state N` | `1` | How many stores per state with `--states` |
+
+`run-parallel`: `--limit`, `--workers`, `--proxies <url…>` (one IP per worker), `--delay-s`.
+
+## Typical usage
 
 ```bash
-docker compose up -d                 # local Postgres on host port 5433
-python -m scraper.cli init-db        # create schema `web_scraping` + tables
-python -m scraper.cli sync-stores    # load ~217 stores (curl, fast)
-python -m scraper.cli run --limit 50 # scrape 50 products end-to-end (browser)
-python -m scraper.cli run            # full catalog (~85k; long-running)
+docker compose up -d                              # local Postgres (or use Supabase DB_URL)
+python -m scraper.cli init-db
+python -m scraper.cli sync-stores                 # store locator (address/zip)
+
+python -m scraper.cli warm                         # solve the first Press & Hold once
+python -m scraper.cli run --source totalwine --patient          # long unattended run
+python -m scraper.cli run --source walmart --limit 500          # walmart alcohol
+
+# per-store pricing across states (Texas first)
+python -m scraper.cli run --source totalwine --states TX,NJ,PA,CA --stores-per-state 1
+
+python -m scraper.cli dashboard                    # http://localhost:8000
 ```
 
-Run **headed** (a Chrome window opens). The first product may show a
-"Press & Hold" challenge — solve it once; the persistent profile
-(`spike_out/px_profile_stealth`) keeps the session warm afterwards. On a
-headless server use `xvfb-run` rather than headless mode (PX blocks headless).
+**Resilience:** every `run` is resumable (skips what's already captured — for
+`--store`, per-store), self-heals transient PX blocks (re-warm + backoff), and
+permanently skips out-of-scope (gifts/cigars/accessories) and known non-alcohol
+products. Blocked ones are retried with `--retry-blocked`.
 
-### Resilience & speed
+## Scaling
 
-- **Resumable**: a re-run skips products already in the DB and retries anything
-  that was blocked, so you can stop/crash and just run `run` again to continue.
-  (`--no-resume` to force a full re-scrape.)
-- **PerimeterX-friendly by default**: a 1s jittered base pace, human-like
-  mouse/scroll, and resources NOT blocked (real browsers load assets). On a
-  block the session backs off, re-warms (human-like homepage browse), and an
-  **adaptive throttle** ramps the pace up and keeps it elevated until PX cools
-  off — this is what prevents the "Press & Hold every 1-2 items" loop on long
-  runs. If PX still loops, the IP is flagged: pause ~15-30 min, or scale via
-  distinct IPs (below).
-- **`--fast`**: max speed (no pacing + block images/css/fonts, ~1.3s/product)
-  for small test runs where PX-block risk doesn't matter. Also `--max-wait-ms`,
-  `--delay-s` to tune.
-- **Scale = distinct IPs** (PerimeterX gates concurrency per IP). One worker per
-  IP:
-  ```bash
-  python -m scraper.cli run-parallel --limit 5000 \
-      --proxies http://ip1:port http://ip2:port http://ip3:port
-  ```
-  This is the local stand-in for the EC2 fleet. Multiple workers on ONE IP just
-  trigger PX challenges, so default is a single worker.
-
-Inspect results:
-```sql
-SELECT source, count(*) FROM web_scraping.product GROUP BY 1;
-SELECT category, count(*) FROM web_scraping.product GROUP BY 1 ORDER BY 2 DESC;
-SELECT * FROM web_scraping.scrape_run ORDER BY id DESC LIMIT 5;
-```
+PerimeterX gates by IP, so one machine/IP tops out at a few hundred products
+before challenges; sustained volume (the ~85k catalog × stores) needs **distinct
+IPs** — either `run-parallel --proxies` (one residential IP per worker) or an
+EC2 fleet (one worker per instance, run headed under `xvfb-run`).
 
 ## Layout
 
 | Path | Purpose |
-|------|---------|
-| `src/scraper/sitemaps.py` | catalog + store enumeration via open sitemaps (curl) |
-| `src/scraper/browser.py` | `TotalWineSession`: patchright/Chrome navigate + intercept |
-| `src/scraper/products.py` | parse `getProduct` → Product + Variant |
-| `src/scraper/reviews.py` | parse reviews list + AI summary |
-| `src/scraper/models.py` | SQLAlchemy tables + Pydantic validation schemas |
-| `src/scraper/db.py` | engine, schema bootstrap, idempotent upserts |
-| `src/scraper/pipeline.py` | orchestration + `scrape_run` tracking |
-| `src/scraper/cli.py` | `init-db` / `sync-stores` / `run` |
-| `src/scraper/recon.py`, `probe_*.py` | Phase-0 recon (how feasibility was established) |
+|---|---|
+| `sitemaps.py` | Total Wine catalog + store enumeration, store-locator API |
+| `browser.py` | `TotalWineSession`: patchright warm, navigate+intercept, `set_store`, `get_json` |
+| `products.py` / `reviews.py` | Total Wine parsers (getProduct, reviews, `attributes`, `in_scope`) |
+| `walmart_session.py` / `walmart_browse.py` / `walmart_parse.py` / `walmart_pipeline.py` | Walmart scraper |
+| `models.py` / `db.py` | schema + Pydantic validation + idempotent upserts |
+| `pipeline.py` | orchestration: run / run_stores / sync_stores / backfill_reviews |
+| `dashboard.py` | local web dashboard |
+| `cli.py` | entrypoint for all commands |
+| `recon.py`, `probe_*.py`, `walmart_probe.py` | recon scripts (how feasibility/mechanisms were established) |
 
-## Migrating to staging
+## Data / DB
 
-The DB target is one env var. Once Ashray grants Supabase access and posts the
-staging Postgres URL, set `DB_URL` to it, keep `DB_SCHEMA=web_scraping` (a
-**new** schema holding all retailers — don't touch existing ones), re-run
-`init-db` then the pipeline. Every table carries a `source` column
-(`totalwine` / `walmart` / `amazon`); pass `--source <name>` on `run`. Later,
-`pipeline.run` wraps cleanly as a Dagster asset for the quarterly schedule.
+`DB_URL` + `DB_SCHEMA` (in `.env`) point at local Postgres or Supabase. For
+Supabase use the Session-pooler connection string with `postgresql+psycopg://`;
+SSL is added automatically. Quick checks:
+```sql
+SELECT source, count(*) FROM web_scraping.product GROUP BY 1;
+SELECT p.name, v.store_id, v.price, s.state, s.zip
+FROM web_scraping.product_variant v
+JOIN web_scraping.product p USING (source, product_id)
+LEFT JOIN web_scraping.store s USING (source, store_id) LIMIT 20;
+```
 
-## Notes / open questions for Ashray
-
-- **Store**: pricing/availability come from the store the browser profile is
-  pinned to (currently storeId 303 / NJ). Confirm which store to standardize on.
-- **Throughput**: ~6–10s per product (full page load). 20–50k records = hours
-  across a few parallel sessions; the ~85k full catalog wants the EC2 fleet.
-- **Reviews depth**: currently the ~10 helpfulness-sorted reviews the page loads;
-  can paginate deeper if needed.
-- **Compliance**: robots.txt permits product pages; confirm ToS stance before a
-  large-scale run.
+## Known gaps / open items
+- Full **sale price (was/now) + "Bestseller" badges** need Total Wine's search
+  API (deferred); `salesStrategy`/`on_deal` captured when present.
+- **Reviews**: top ~10 per product (pagination not implemented).
+- **Amazon**: no scrapable alcohol catalog (marketplace shut down 2017) — skipped.
+- **Scale**: needs the residential-IP / EC2 decision for the full catalog.
