@@ -51,8 +51,8 @@ def gather(source: str | None = None) -> dict:
         d["avg_price"] = sc(f"SELECT round(avg(price)::numeric,2) FROM {S}.product_variant WHERE price IS NOT NULL{p_and}")
         d["with_rating"] = sc(f"SELECT count(*) FROM {S}.product WHERE review_count > 0{p_and}")
         d["new"] = sc(f"SELECT count(*) FROM {S}.product WHERE is_new = true{p_and}")
-        d["on_deal"] = sc(f"SELECT count(*) FROM {S}.product "
-                          f"WHERE attributes->>'on_deal' = 'true'{p_and}")
+        d["on_deal"] = sc(f"SELECT count(DISTINCT product_id) FROM {S}.product_variant "
+                          f"WHERE on_deal = true{p_and}")
         d["subcats"] = c.execute(text(
             f"SELECT coalesce(subcategory,'(none)'), count(*) n FROM {S}.product "
             f"WHERE subcategory IS NOT NULL{p_and} GROUP BY 1 ORDER BY n DESC LIMIT 12"), prm).all()
@@ -87,7 +87,7 @@ def gather(source: str | None = None) -> dict:
         # joined to the store table for store name/city/state/zip.
         d["preview"] = c.execute(text(
             f"SELECT DISTINCT ON (p.product_id) p.source, p.product_id, p.name, p.brand, "
-            f"p.category, p.subcategory, v.size, v.price, v.store_id, "
+            f"p.category, p.subcategory, v.size, v.price, v.list_price, v.on_deal, v.store_id, "
             f"st.name AS store_name, st.city AS store_city, st.state AS store_state, "
             f"st.zip AS store_zip, v.stock, v.in_stock, "
             f"p.avg_rating, p.review_count, p.is_new, p.attributes, p.ai_review_summary, p.url "
@@ -137,9 +137,10 @@ def gather_stores() -> dict:
 
 
 _PREVIEW_COLS = ["source", "product_id", "name", "brand", "category", "subcategory",
-                 "size", "price", "store_id", "store_name", "store_city", "store_state",
-                 "store_zip", "stock", "in_stock", "avg_rating", "review_count",
-                 "is_new", "attributes", "ai_review_summary", "url"]
+                 "size", "price", "list_price", "on_deal", "store_id", "store_name",
+                 "store_city", "store_state", "store_zip", "stock", "in_stock",
+                 "avg_rating", "review_count", "is_new", "attributes",
+                 "ai_review_summary", "url"]
 
 
 def _cell(col, val) -> str:
@@ -427,7 +428,7 @@ def render_product(pv: dict) -> str:
 </header>
 <main>
   <section><h2>Sizes &amp; price</h2><table>
-    <tr><th>size</th><th>price</th><th>stock</th><th>qty</th><th>store</th></tr>{variants}</table></section>
+    <tr><th>size</th><th>price</th><th>was</th><th>stock</th><th>qty</th><th>store</th></tr>{variants}</table></section>
   <section><h2>Product details</h2>{details}</section>
   {summ}
   <section><h2>Reviews ({len(pv['reviews'])})</h2>{reviews}</section>
