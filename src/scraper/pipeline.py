@@ -31,6 +31,7 @@ from .db import (
     upsert_products,
     upsert_reviews,
     upsert_stores,
+    with_db_retry,
 )
 from .models import ScrapeRun, utcnow
 from .products import in_scope, parse_product
@@ -140,13 +141,39 @@ def _persist_one(data: dict, source: str = DEFAULT_SOURCE) -> bool:
     pid = product.product_id
     reviews = parse_reviews(data.get("reviews") or {}, product_id=pid)
 
-    with session_scope() as session:
-        upsert_products(session, _stamp([product.model_dump()], source))
-        if variant is not None:
-            insert_variants(session, _stamp([variant.model_dump()], source))
-        if reviews:
-            upsert_reviews(session, _stamp([r.model_dump() for r in reviews], source))
+    def _persist():
+        with session_scope() as session:
+            upsert_products(session, _stamp([product.model_dump()], source))
+            if variant is not None:
+                insert_variants(session, _stamp([variant.model_dump()], source))
+            if reviews:
+                upsert_reviews(session, _stamp([r.model_dump() for r in reviews], source))
+
+    with_db_retry(_persist)  # survive a sleep/network blip instead of crashing
     return True
+
+
+# Retried variants of the small in-loop DB writes, so a sleep/network blip on
+# any of them re-connects instead of crashing a long run (see with_db_retry).
+def _record_blocked(source: str, code: str, url: str, reason: str = "PXBlocked") -> None:
+    def go():
+        with session_scope() as session:
+            record_blocked(session, source, code, url, reason=reason)
+    with_db_retry(go)
+
+
+def _clear_blocked(source: str, code: str) -> None:
+    def go():
+        with session_scope() as session:
+            clear_blocked(session, source, code)
+    with_db_retry(go)
+
+
+def _upsert_stores(rows: list[dict]) -> None:
+    def go():
+        with session_scope() as session:
+            upsert_stores(session, rows)
+    with_db_retry(go)
 
 
 class _Throttle:
@@ -398,8 +425,7 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
                 if data is None:
                     blocked += 1
                     if code:
-                        with session_scope() as session:
-                            record_blocked(session, source, code, url)
+                        _record_blocked(source, code, url)
                     thr.pace()
                     continue
                 thr.on_success()
@@ -410,8 +436,7 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
                     out_of_scope += 1
                     if code:
                         excluded_ids.add(code)
-                        with session_scope() as session:
-                            record_blocked(session, source, code, url, reason="out_of_scope")
+                        _record_blocked(source, code, url, reason="out_of_scope")
                     thr.pace()
                     continue
 
@@ -420,15 +445,13 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
                     if code:
                         done.add(code)   # avoid re-fetching within this run too
                         if retry_blocked:
-                            with session_scope() as session:
-                                clear_blocked(session, source, code)
+                            _clear_blocked(source, code)
                     # Auto-enrich a store we haven't catalogued yet.
                     sid = str(pj.get("storeId") or "")
                     if sid and sid not in known_stores:
                         det = store_from_json(sid, sess.get_json(store_api_url(sid)))
                         if det:
-                            with session_scope() as session:
-                                upsert_stores(session, _stamp([det.model_dump()], source))
+                            _upsert_stores(_stamp([det.model_dump()], source))
                         known_stores.add(sid)  # add regardless so we don't retry
                 else:
                     errors += 1
@@ -445,12 +468,14 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
                     time.sleep(pause_seconds)
                 thr.pace()
     finally:
-        with session_scope() as session:
-            row = session.get(ScrapeRun, run_id)
-            row.finished_at = utcnow()
-            row.records_ingested = ingested
-            row.error_count = errors + blocked
-            row.notes = f"skipped={skipped} out_of_scope={out_of_scope} blocked={blocked}"
+        def _finalize():
+            with session_scope() as session:
+                row = session.get(ScrapeRun, run_id)
+                row.finished_at = utcnow()
+                row.records_ingested = ingested
+                row.error_count = errors + blocked
+                row.notes = f"skipped={skipped} out_of_scope={out_of_scope} blocked={blocked}"
+        with_db_retry(_finalize)
 
     summary = {"ingested": ingested, "skipped": skipped, "out_of_scope": out_of_scope,
                "errors": errors, "blocked": blocked, "store": store_id, "run_id": run_id}

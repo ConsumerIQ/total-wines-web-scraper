@@ -6,14 +6,19 @@ instead of duplicating them (needed for the quarterly cadence).
 
 from __future__ import annotations
 
+import logging
+import time
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Callable, Iterator, TypeVar
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import config
+
+log = logging.getLogger(__name__)
 from .models import (
     Base,
     BlockedProduct,
@@ -65,6 +70,35 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+_T = TypeVar("_T")
+
+
+def with_db_retry(fn: Callable[[], _T], *, attempts: int = 6,
+                  base_delay: float = 5.0, max_delay: float = 60.0) -> _T:
+    """Run a DB unit of work, retrying transient connection loss.
+
+    A long unattended run survives the laptop sleeping/waking: on wake the
+    pooled connection is dead and DNS may briefly fail, so we dispose the pool
+    (forcing a fresh connect + DNS lookup) and back off long enough for the
+    network to recover, rather than crashing after hours of work. Upserts are
+    idempotent, so re-running the unit of work is safe. Re-raises if it never
+    recovers within `attempts`.
+    """
+    for i in range(attempts):
+        try:
+            return fn()
+        except (OperationalError, DBAPIError) as e:
+            if i == attempts - 1:
+                raise
+            engine.dispose()  # drop stale/dead pooled connections
+            delay = min(max_delay, base_delay * (2 ** i))
+            log.warning("DB connection lost (%s); disposed pool, retrying in "
+                        "%.0fs (attempt %d/%d) — likely a sleep/network blip",
+                        type(e).__name__, delay, i + 1, attempts)
+            time.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 def existing_product_ids(source: str) -> set[str]:
