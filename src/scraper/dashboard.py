@@ -330,7 +330,6 @@ def render(d: dict) -> str:
     )
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="15">
 <title>Total Wine Scraper — Dashboard</title>
 <style>
   * {{ box-sizing: border-box; }}
@@ -378,7 +377,7 @@ def render(d: dict) -> str:
   table.wide th, table.wide td {{ white-space:nowrap; max-width:300px; overflow:hidden; text-overflow:ellipsis; }}
 </style></head><body>
 <header><h1>\U0001f377 Web Scraper — Ingestion Dashboard</h1>
-<div class="sub">schema <code>{S}</code> &middot; {("source: <b>"+html.escape(active)+"</b>") if active else "all sources"} &middot; auto-refreshes every 15s</div>
+<div class="sub">schema <code>{S}</code> &middot; {("source: <b>"+html.escape(active)+"</b>") if active else "all sources"} &middot; <a href="javascript:location.reload()">↻ reload</a></div>
 {tabs}</header>
 <main>
   <div class="cards">{cards}</div>
@@ -444,7 +443,7 @@ def render_stores(d: dict, sources: list) -> str:
         for r in d["rows"]
     )
     return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="30"><title>Web Scraper — Stores</title>
+<title>Web Scraper — Stores</title>
 <style>{_STYLE}</style></head><body>
 <header><h1>\U0001f377 Web Scraper — Stores</h1>
 <div class="sub">schema <code>{S}</code> &middot; store locator dataset</div>
