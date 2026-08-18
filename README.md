@@ -79,11 +79,25 @@ python -m scraper.cli warm                         # solve the first Press & Hol
 python -m scraper.cli run --source totalwine --patient          # long unattended run
 python -m scraper.cli run --source walmart --limit 500          # walmart alcohol
 
+# recommended for a long unattended run on a laptop:
+caffeinate -is python -m scraper.cli run --source totalwine --limit 50000 --patient
+
 # per-store pricing across states (Texas first)
 python -m scraper.cli run --source totalwine --states TX,NJ,PA,CA --stores-per-state 1
 
 python -m scraper.cli dashboard                    # http://localhost:8000
 ```
+
+For a long unattended run on a Mac laptop, wrap it in `caffeinate -is` and keep
+`--patient`:
+- **`--patient`** is required for a long run — it paces requests and takes
+  periodic breaks so PerimeterX's bot score decays instead of escalating to a
+  Press & Hold. Without it a large run gets flagged and blocked.
+- **`caffeinate -is`** keeps the process running when the screen turns off
+  (`-i` no idle sleep, `-s` no system sleep on AC). The screen can go dark; the
+  scrape keeps going. Keep the laptop **plugged in and the lid open** — nothing
+  overrides clamshell (lid-closed) sleep or battery sleep. (Even if it does
+  briefly sleep, the run now retries the DB connection instead of crashing.)
 
 **Resilience:** every `run` is resumable (skips what's already captured — for
 `--store`, per-store), self-heals transient PX blocks (re-warm + backoff), and
