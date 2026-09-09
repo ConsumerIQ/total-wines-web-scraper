@@ -83,6 +83,11 @@ class ProductVariant(Base):
         DateTime(timezone=True), default=utcnow, primary_key=True
     )
     product_id: Mapped[str] = mapped_column(String)
+    # The store we PINNED when fetching. store_id above is where the price
+    # actually came from — Total Wine falls back to a nearby store when the
+    # pinned store doesn't carry the product, so the two can differ. Resume
+    # keys on requested_store_id ("did we already try this product at store X?").
+    requested_store_id: Mapped[str | None] = mapped_column(String)
     size: Mapped[str | None] = mapped_column(String)
     price: Mapped[float | None] = mapped_column(Float)       # effective (sale if on deal)
     list_price: Mapped[float | None] = mapped_column(Float)  # regular (EDLP) price
@@ -198,6 +203,7 @@ class VariantIn(BaseModel):
     variant_id: str
     product_id: str
     store_id: str = ""
+    requested_store_id: str | None = None
     size: str | None = None
     price: float | None = Field(default=None, ge=0)
     list_price: float | None = Field(default=None, ge=0)

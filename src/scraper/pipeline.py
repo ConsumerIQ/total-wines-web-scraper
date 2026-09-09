@@ -25,7 +25,7 @@ from .db import (
     existing_blocked_ids,
     existing_product_ids,
     insert_variants,
-    product_ids_with_variant,
+    product_ids_attempted_at,
     record_blocked,
     session_scope,
     upsert_products,
@@ -128,8 +128,13 @@ def sync_stores(source: str = DEFAULT_SOURCE, resume: bool = True) -> dict:
     return summary
 
 
-def _persist_one(data: dict, source: str = DEFAULT_SOURCE) -> bool:
-    """Validate + persist one product's payloads. Returns True on success."""
+def _persist_one(data: dict, source: str = DEFAULT_SOURCE,
+                 requested_store: str | None = None) -> bool:
+    """Validate + persist one product's payloads. Returns True on success.
+
+    requested_store is the store we PINNED for this fetch (may differ from the
+    variant's store_id when Total Wine falls back to a neighbour) — stamped so
+    resume knows we already tried this product at that store."""
     product_json = data.get("product")
     if not product_json:
         return False
@@ -137,6 +142,8 @@ def _persist_one(data: dict, source: str = DEFAULT_SOURCE) -> bool:
     product, variant = parse_product(product_json, ai_review_summary=summary)
     if product is None:
         return False
+    if variant is not None and requested_store:
+        variant.requested_store_id = requested_store
 
     pid = product.product_id
     reviews = parse_reviews(data.get("reviews") or {}, product_id=pid)
@@ -346,17 +353,21 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
     """
     ingested = skipped = errors = blocked = out_of_scope = 0
     thr = _Throttle(base=delay_s)
-    # Per-store resume when a store is pinned (so store B doesn't skip products
-    # already captured at store A); otherwise resume by product.
+    # Resume keys on the REQUESTED (pinned) store, not where the price came from:
+    # if we already tried a product at store X we don't retry it there — even if
+    # the price fell back to a neighbour — but a product only ever fetched at a
+    # DIFFERENT store is still attempted here. `pinned` is the store we set (and
+    # stamp on each variant). With --store we know it now; for a default run we
+    # resolve the profile's pinned store after warm-up (see resume_after_warm).
+    done: set[str] = set()
+    resume_after_warm = False
+    pinned = store_id  # for the default run, resolved after warm-up below
     if resume and store_id:
-        done = product_ids_with_variant(source, store_id)
+        done = product_ids_attempted_at(source, store_id)
+        log.info("resume: %d products already attempted at store %s will be skipped",
+                 len(done), store_id)
     elif resume:
-        done = existing_product_ids(source)
-    else:
-        done = set()
-    if done:
-        log.info("resume: %d products already captured%s will be skipped",
-                 len(done), f" at store {store_id}" if store_id else "")
+        resume_after_warm = True  # skip-set depends on the profile's pinned store
     # Skip previously-blocked products by default so resume doesn't retry them
     # first and ramp the throttle; --retry-blocked forces another attempt.
     blocked_ids = set() if retry_blocked else existing_blocked_ids(source)
@@ -409,6 +420,21 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
                 else:
                     log.warning("could not pin store %s — prices may be from another "
                                 "store; continuing", store_id)
+            # Default run (no --store): the pinned store is the profile default.
+            # Resume against products already ATTEMPTED at that store, so we don't
+            # skip one just because a fallback price was recorded under a
+            # different store — and we don't re-fetch one we already tried here.
+            if resume_after_warm:
+                eff = sess.current_store_id()
+                if eff:
+                    pinned = eff
+                    done = product_ids_attempted_at(source, eff)
+                    log.info("resume: %d products already attempted at store %s "
+                             "(profile default) will be skipped", len(done), eff)
+                else:
+                    log.warning("could not detect the profile's pinned store; resuming "
+                                "by product across all stores")
+                    done = existing_product_ids(source)
             for url in iter_product_urls(limit=limit, max_sitemaps=max_sitemaps):
                 code = _url_code(url)
                 if code and (code in done or code in blocked_ids or code in excluded_ids):
@@ -440,7 +466,7 @@ def run(*, source: str = DEFAULT_SOURCE, limit: int | None = None,
                     thr.pace()
                     continue
 
-                if _persist_one(data, source):
+                if _persist_one(data, source, requested_store=pinned):
                     ingested += 1
                     if code:
                         done.add(code)   # avoid re-fetching within this run too

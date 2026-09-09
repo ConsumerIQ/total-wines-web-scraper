@@ -76,15 +76,20 @@ _T = TypeVar("_T")
 
 
 def with_db_retry(fn: Callable[[], _T], *, attempts: int = 6,
-                  base_delay: float = 5.0, max_delay: float = 60.0) -> _T:
+                  base_delay: float = 5.0, max_delay: float = 60.0,
+                  final_wait: float = 300.0) -> _T:
     """Run a DB unit of work, retrying transient connection loss.
 
     A long unattended run survives the laptop sleeping/waking: on wake the
     pooled connection is dead and DNS may briefly fail, so we dispose the pool
     (forcing a fresh connect + DNS lookup) and back off long enough for the
     network to recover, rather than crashing after hours of work. Upserts are
-    idempotent, so re-running the unit of work is safe. Re-raises if it never
-    recovers within `attempts`.
+    idempotent, so re-running the unit of work is safe.
+
+    Backoff is exponential (capped at max_delay), but the wait BEFORE the final
+    attempt is `final_wait` (default 5 min) — one last long grace period for the
+    internet to come back after a real outage before giving up. Re-raises if it
+    still can't connect on the final attempt.
     """
     for i in range(attempts):
         try:
@@ -93,7 +98,8 @@ def with_db_retry(fn: Callable[[], _T], *, attempts: int = 6,
             if i == attempts - 1:
                 raise
             engine.dispose()  # drop stale/dead pooled connections
-            delay = min(max_delay, base_delay * (2 ** i))
+            # last retry gets a long grace wait; earlier ones back off normally
+            delay = final_wait if i == attempts - 2 else min(max_delay, base_delay * (2 ** i))
             log.warning("DB connection lost (%s); disposed pool, retrying in "
                         "%.0fs (attempt %d/%d) — likely a sleep/network blip",
                         type(e).__name__, delay, i + 1, attempts)
@@ -122,6 +128,22 @@ def product_ids_with_variant(source: str, store_id: str) -> set[str]:
             row[0]
             for row in session.query(ProductVariant.product_id).filter(
                 ProductVariant.source == source, ProductVariant.store_id == store_id
+            )
+        }
+
+
+def product_ids_attempted_at(source: str, requested_store: str) -> set[str]:
+    """product_ids already ATTEMPTED while pinned to this store (by requested
+    store, not the store the price came back from). This is the resume key: if
+    we tried a product at store X we don't retry it there — even if the price
+    fell back to a neighbouring store — but a product only ever fetched at a
+    DIFFERENT store is still fetched here."""
+    with SessionLocal() as session:
+        return {
+            row[0]
+            for row in session.query(ProductVariant.product_id).filter(
+                ProductVariant.source == source,
+                ProductVariant.requested_store_id == requested_store,
             )
         }
 

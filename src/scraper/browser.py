@@ -207,6 +207,20 @@ class TotalWineSession:
             pass
         return f"ispStore~{store_id}" in info if store_id else bool(info)
 
+    def current_store_id(self) -> str | None:
+        """The store the session is currently pinned to (from the store cookie).
+
+        For a run with no explicit --store, the profile's default store is what
+        getProduct stamps on variants — so resume should scope to this id, not
+        skip the product globally."""
+        try:
+            info = {c["name"]: c["value"] for c in self._ctx.cookies()}.get(
+                "twm-userStoreInformation", "")
+        except Exception:
+            return None
+        m = re.search(r"ispStore~(\d+)", info)
+        return m.group(1) if m else None
+
     def get_json(self, url: str) -> dict | None:
         """Navigate to a JSON API endpoint (PX-gated to curl) and parse the
         body — works because the browser context is PX-cleared."""
