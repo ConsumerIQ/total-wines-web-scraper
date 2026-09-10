@@ -184,29 +184,39 @@ def _upsert_stores(rows: list[dict]) -> None:
 
 
 class _Throttle:
-    """Adaptive pacing that ramps up when PerimeterX blocks and decays slowly.
+    """Adaptive pacing that ramps up when PerimeterX blocks, then FULLY cools
+    back down once blocks stop — so a run recovers its speed instead of staying
+    slow for the rest of a long session.
 
-    Unlike a per-request cooldown that resets on every success, the penalty
-    persists across items, so a session that PX has started challenging slows
-    down and *stays* slow for a while — which is what actually lowers the bot
-    score and breaks the block-every-1-2-items loop.
+    A block raises the penalty (and it persists across a few items to actually
+    lower the bot score and break the block-every-1-2-items loop). But each
+    clean fetch decays it, and a sustained clean streak resets it to zero — back
+    to baseline speed. Without that reset, occasional blocks over a long run
+    keep the penalty elevated and throughput drifts down and never recovers.
     """
+
+    CLEAN_RESET = 8   # consecutive clean fetches -> fully cooled down
 
     def __init__(self, base: float, cap: float = 45.0):
         self.base = base
         self.cap = cap
         self.penalty = 0.0
-        self.consec = 0
+        self.consec = 0     # consecutive blocks
+        self.clean = 0      # consecutive successes
 
     def on_block(self) -> float:
         self.consec += 1
+        self.clean = 0
         # escalate the penalty; long recovery cooldown scales with the streak
         self.penalty = min(self.cap, max(self.penalty * 1.7, 4.0) + 3.0)
         return min(self.cap, 5.0 * self.consec)
 
     def on_success(self) -> None:
         self.consec = 0
-        self.penalty *= 0.7          # decay slowly, not instantly
+        self.clean += 1
+        self.penalty *= 0.6                     # decay
+        if self.clean >= self.CLEAN_RESET or self.penalty < 0.5:
+            self.penalty = 0.0                  # sustained clean streak -> baseline
 
     def pace(self) -> None:
         wait = self.base + self.penalty
