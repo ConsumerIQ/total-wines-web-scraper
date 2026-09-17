@@ -3,7 +3,7 @@
 Scrapes retail beverage-alcohol data (product, per-store pricing, reviews, store
 locator) as a replacement for the paid **Bright Data** feed. Two retailers live:
 **Total Wine** (deep catalog) and **Walmart** (alcohol only). Data lands in a
-Postgres/Supabase schema `web_scraping`, tagged by `source`.
+Postgres/Supabase schema `retail_product_data`, tagged by `source`.
 
 ## How it works
 
@@ -27,7 +27,7 @@ per **store**, in the key), `review`, `store` (address/zip/geo), `scrape_run`,
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 patchright install chromium          # stealth browser runtime
-cp .env.example .env                 # set DB_URL (local docker or Supabase) + DB_SCHEMA=web_scraping
+cp .env.example .env                 # set DB_URL (local docker or Supabase) + DB_SCHEMA=retail_product_data
 ```
 Needs **Google Chrome** installed (session uses `channel="chrome"`). Run
 **headed** (PX blocks headless); on a headless server use `xvfb-run`.
@@ -36,7 +36,7 @@ Needs **Google Chrome** installed (session uses `channel="chrome"`). Run
 
 | Command | What it does |
 |---|---|
-| `init-db` | Create schema `web_scraping` + all tables (idempotent; adds missing tables) |
+| `init-db` | Create schema `retail_product_data` + all tables (idempotent; adds missing tables) |
 | `sync-stores [--source]` | Load + enrich the store locator (address/zip/phone/geo) via the browser |
 | `warm [--source]` | Open the browser so you can solve the first Press & Hold once (warms the profile) |
 | `run …` | Scrape products (see flags below) |
@@ -131,11 +131,11 @@ EC2 fleet (one worker per instance, run headed under `xvfb-run`).
 Supabase use the Session-pooler connection string with `postgresql+psycopg://`;
 SSL is added automatically. Quick checks:
 ```sql
-SELECT source, count(*) FROM web_scraping.product GROUP BY 1;
+SELECT source, count(*) FROM retail_product_data.product GROUP BY 1;
 SELECT p.name, v.store_id, v.price, s.state, s.zip
-FROM web_scraping.product_variant v
-JOIN web_scraping.product p USING (source, product_id)
-LEFT JOIN web_scraping.store s USING (source, store_id) LIMIT 20;
+FROM retail_product_data.product_variant v
+JOIN retail_product_data.product p USING (source, product_id)
+LEFT JOIN retail_product_data.store s USING (source, store_id) LIMIT 20;
 ```
 
 ## Known gaps / open items

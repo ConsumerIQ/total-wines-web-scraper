@@ -3,7 +3,7 @@
 Two layers on purpose:
 - Pydantic `*In` models validate/clean every record scraped from a site BEFORE
   it touches the DB (the "data validation" step Ashray flagged).
-- SQLAlchemy models are the persisted shape in Postgres (schema=`web_scraping`).
+- SQLAlchemy models are the persisted shape in Postgres (schema=`retail_product_data`).
 
 Multi-source: every table carries a `source` column (e.g. 'totalwine',
 'walmart', 'amazon') and it's part of the primary key, so the same schema holds
@@ -40,7 +40,7 @@ def utcnow() -> datetime:
 
 
 class Base(DeclarativeBase):
-    # Bind every table to the configured schema (e.g. `web_scraping`).
+    # Bind every table to the configured schema (e.g. `retail_product_data`).
     metadata = MetaData(schema=config.db_schema)
 
 

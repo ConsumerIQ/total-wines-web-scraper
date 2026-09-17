@@ -32,7 +32,7 @@ class Config:
         "DB_URL",
         "postgresql+psycopg://scraper:scraper@localhost:5433/totalwine",
     )
-    db_schema: str = os.getenv("DB_SCHEMA", "web_scraping")
+    db_schema: str = os.getenv("DB_SCHEMA", "retail_product_data")
     store_id: str = os.getenv("STORE_ID", "")
     headless: bool = _bool("HEADLESS", True)
     proxy_urls: list[str] = field(default_factory=lambda: _list("PROXY_URLS"))
