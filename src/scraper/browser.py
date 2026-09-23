@@ -232,6 +232,25 @@ class TotalWineSession:
         except Exception:
             return None
 
+    def fetch_reviews(self, product_id: str, department: str | None = None,
+                      limit: int = 30) -> dict | None:
+        """Fetch the reviews LIST directly through the warm context.
+
+        Total Wine stopped firing the reviews-list XHR on scroll (only
+        summary/images fire now), so interception no longer catches reviews.
+        The PX-cleared context still returns the JSON when we request the
+        endpoint ourselves. Shape matches what parse_reviews expects
+        ({"results": [...], "totalResults": N})."""
+        if not product_id:
+            return None
+        url = ("https://www.totalwine.com/product/api/product/product-reviews/v1/"
+               f"products/{product_id}/reviews?limit={limit}&offset=0"
+               "&FilteredStats=Reviews&Include=Products,Authors&Stats=Reviews"
+               "&Sort=Helpfulness:desc")
+        if department:
+            url += f"&department={department}"
+        return self.get_json(url)
+
     def rewarm(self, wait_ms: int | None = None) -> bool:
         """Recover a cold/blocked session: browse the homepage like a human and
         let the PX sensor re-run (patchright usually clears the invisible
@@ -263,7 +282,12 @@ class TotalWineSession:
         it. No navigation away, so the challenge the user sees stays put.
         """
         if self._wait_for("product", seconds * 1000):
-            self._wait_for("reviews", self.capture_grace_ms)
+            self._wait_for("summary", self.capture_grace_ms)
+            if "reviews" not in self._cap:
+                prod = self._cap.get("product") or {}
+                revs = self.fetch_reviews(str(prod.get("id") or ""), prod.get("department"))
+                if revs:
+                    self._cap["reviews"] = revs
             return {
                 "product": self._cap.get("product"),
                 "reviews": self._cap.get("reviews"),
@@ -289,15 +313,22 @@ class TotalWineSession:
         if "product" not in self._cap:
             raise PXBlocked(url)
 
-        # Reviews often load lazily when the reviews section scrolls into view,
-        # so nudge the page down to trigger that XHR, then wait for it.
-        if "reviews" not in self._cap:
+        # The summary XHR still fires on scroll — nudge the page to catch it.
+        if "summary" not in self._cap:
             try:
                 self._page.evaluate(
                     "window.scrollTo(0, document.body.scrollHeight * 0.75)")
             except Exception:
                 pass
-            self._wait_for("reviews", self.capture_grace_ms)
+            self._wait_for("summary", self.capture_grace_ms)
+
+        # The reviews-list XHR no longer auto-fires; request it directly through
+        # the warm context (navigates away, so do this last). Returns dated reviews.
+        if "reviews" not in self._cap:
+            prod = self._cap.get("product") or {}
+            revs = self.fetch_reviews(str(prod.get("id") or ""), prod.get("department"))
+            if revs:
+                self._cap["reviews"] = revs
 
         if self.delay_s:
             time.sleep(self.delay_s)
