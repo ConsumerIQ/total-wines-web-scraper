@@ -108,22 +108,6 @@ class TotalWineSession:
             if self._pw:
                 self._pw.stop()
 
-    # -- store selection ---------------------------------------------------- #
-    def set_store(self, twm_cookie: str) -> None:
-        """Override the store/method by rewriting the twm-userStoreInformation
-        cookie, e.g. "ispStore~303:ifcStore~306@ifcStoreState~US-NJ@method~INSTORE_PICKUP".
-        """
-        try:
-            self._ctx.clear_cookies(name="twm-userStoreInformation")
-        except Exception:
-            pass
-        self._ctx.add_cookies([
-            {"name": "twm-userStoreInformation", "value": twm_cookie,
-             "domain": "www.totalwine.com", "path": "/"},
-            {"name": "overrideStore", "value": "true",
-             "domain": "www.totalwine.com", "path": "/"},
-        ])
-
     # -- interception ------------------------------------------------------- #
     def _on_response(self, resp) -> None:
         u = resp.url
@@ -243,12 +227,13 @@ class TotalWineSession:
         ({"results": [...], "totalResults": N})."""
         if not product_id:
             return None
+        # Mirror the page's own request exactly (Include comma URL-encoded,
+        # department before Sort) so the PX-fronted endpoint accepts it.
+        dept = f"&department={department}" if department else ""
         url = ("https://www.totalwine.com/product/api/product/product-reviews/v1/"
                f"products/{product_id}/reviews?limit={limit}&offset=0"
-               "&FilteredStats=Reviews&Include=Products,Authors&Stats=Reviews"
-               "&Sort=Helpfulness:desc")
-        if department:
-            url += f"&department={department}"
+               "&FilteredStats=Reviews&Include=Products%2CAuthors&Stats=Reviews"
+               f"{dept}&Sort=Helpfulness:desc")
         return self.get_json(url)
 
     def rewarm(self, wait_ms: int | None = None) -> bool:
@@ -277,17 +262,20 @@ class TotalWineSession:
 
     def wait_for_solve(self, seconds: int) -> dict | None:
         """After a product blocked, keep the challenge page on screen and wait
-        for the USER to complete the Press & Hold. If they solve it, the page
-        loads the product and its getProduct XHR fires — we capture and return
-        it. No navigation away, so the challenge the user sees stays put.
+        for the USER to complete the Press & Hold. No navigation happens while
+        waiting, so the challenge the user sees stays put. Once they solve it the
+        getProduct XHR fires and we capture it; then (only if the product has
+        reviews) we fetch the reviews list, which does navigate away — that's
+        fine, the challenge is already cleared.
         """
         if self._wait_for("product", seconds * 1000):
-            self._wait_for("summary", self.capture_grace_ms)
-            if "reviews" not in self._cap:
-                prod = self._cap.get("product") or {}
-                revs = self.fetch_reviews(str(prod.get("id") or ""), prod.get("department"))
-                if revs:
-                    self._cap["reviews"] = revs
+            prod = self._cap.get("product") or {}
+            if (prod.get("customerReviewsCount") or 0) > 0:
+                self._wait_for("summary", self.capture_grace_ms)
+                if "reviews" not in self._cap:
+                    revs = self.fetch_reviews(str(prod.get("id") or ""), prod.get("department"))
+                    if revs:
+                        self._cap["reviews"] = revs
             return {
                 "product": self._cap.get("product"),
                 "reviews": self._cap.get("reviews"),
@@ -313,22 +301,25 @@ class TotalWineSession:
         if "product" not in self._cap:
             raise PXBlocked(url)
 
-        # The summary XHR still fires on scroll — nudge the page to catch it.
-        if "summary" not in self._cap:
-            try:
-                self._page.evaluate(
-                    "window.scrollTo(0, document.body.scrollHeight * 0.75)")
-            except Exception:
-                pass
-            self._wait_for("summary", self.capture_grace_ms)
-
-        # The reviews-list XHR no longer auto-fires; request it directly through
-        # the warm context (navigates away, so do this last). Returns dated reviews.
-        if "reviews" not in self._cap:
-            prod = self._cap.get("product") or {}
-            revs = self.fetch_reviews(str(prod.get("id") or ""), prod.get("department"))
-            if revs:
-                self._cap["reviews"] = revs
+        # Only chase reviews/summary when the product actually has reviews — the
+        # AI summary is derived from reviews, so a 0-review product would just
+        # burn the full grace window and an extra navigation for nothing.
+        prod = self._cap.get("product") or {}
+        if (prod.get("customerReviewsCount") or 0) > 0:
+            # The summary XHR still fires on scroll — nudge the page to catch it.
+            if "summary" not in self._cap:
+                try:
+                    self._page.evaluate(
+                        "window.scrollTo(0, document.body.scrollHeight * 0.75)")
+                except Exception:
+                    pass
+                self._wait_for("summary", self.capture_grace_ms)
+            # The reviews-list XHR no longer auto-fires; request it directly
+            # through the warm context (navigates away, so do this last).
+            if "reviews" not in self._cap:
+                revs = self.fetch_reviews(str(prod.get("id") or ""), prod.get("department"))
+                if revs:
+                    self._cap["reviews"] = revs
 
         if self.delay_s:
             time.sleep(self.delay_s)
