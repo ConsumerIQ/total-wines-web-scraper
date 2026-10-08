@@ -116,12 +116,46 @@ def fetch_store_detail(store_id: str) -> StoreIn | None:
         return None
 
 
+# Full state/territory name -> USPS code, for turning the store-info slug
+# (`<state-words>-<city-words>`) into a 2-letter state like the enriched path.
+_US_STATES = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
+    "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+    "wisconsin": "WI", "wyoming": "WY", "puerto rico": "PR",
+}
+
+
+def _slug_state_city(slug: str) -> tuple[str | None, str | None]:
+    """Split a `<state-words>-<city-words>` slug into (2-letter state, city).
+
+    The state can be multiple words (`new-york-westbury`), so match the longest
+    known state-name prefix (up to 3 words for 'district of columbia') rather
+    than assuming the first token is the state. Returns a USPS code to match the
+    enriched store path; unknown prefixes yield (None, whole-slug-as-city)."""
+    words = slug.split("-")
+    for n in (3, 2, 1):
+        name = " ".join(words[:n])
+        if name in _US_STATES:
+            city = " ".join(words[n:]).title() or None
+            return _US_STATES[name], city
+    return None, slug.replace("-", " ").title() or None
+
+
 def iter_stores() -> Iterator[StoreIn]:
     """Yield StoreIn parsed from the store sitemap URLs.
 
     Only id + slug-derived state/city are available here; richer fields would
-    need a store-detail call. Slug format is `<state>-<city>` (state is the
-    first token; the remainder is the city).
+    need a store-detail call. Slug format is `<state-words>-<city-words>`.
     """
     store_sm = next((u for u in _locs(_get(INDEX_URL)) if "Store-en-USD" in u), None)
     if not store_sm:
@@ -131,13 +165,13 @@ def iter_stores() -> Iterator[StoreIn]:
         if not m:
             continue
         slug, store_id = m.group(1), m.group(2)
-        state, _, city = slug.partition("-")
+        state, city = _slug_state_city(slug)
         try:
             yield StoreIn(
                 store_id=store_id,
                 name=slug.replace("-", " ").title(),
-                city=city.replace("-", " ").title() or None,
-                state=state.replace("-", " ").title() or None,
+                city=city,
+                state=state,
             )
         except Exception:
             continue
